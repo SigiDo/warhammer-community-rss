@@ -7,218 +7,197 @@ import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from email.utils import format_datetime
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode, urljoin
 from urllib.request import Request, urlopen
 
 
 API_URL = "https://www.warhammer-community.com/api/search/news/"
-SITE_URL = "https://www.warhammer-community.com/"
 OUTPUT_FILE = "docs/feed.xml"
 MAX_ITEMS = 30
+PAGE_SIZE = 16
 MAX_PAGES = 3
 
 
-def fetch_json(page):
-    params = urlencode({
+def fetch_news(page):
+    payload = {
+        "sortBy": "date_desc",
+        "category": "",
+        "collections": ["articles"],
+        "game_systems": [],
+        "index": "news",
+        "locale": "en-gb",
         "page": page,
-        "sortby": "date_desc",
-    })
+        "perPage": PAGE_SIZE,
+        "topics": [],
+    }
 
-    url = API_URL + "?" + params
+    body = json.dumps(payload).encode("utf-8")
 
     request = Request(
-        url,
+        API_URL,
+        data=body,
         headers={
-            "User-Agent": (
-                "Mozilla/5.0 "
-                "(compatible; WarhammerCommunityRSS/1.0)"
-            ),
+            "User-Agent": "Mozilla/5.0",
+            "Content-Type": "application/json",
             "Accept": "application/json",
-            "Accept-Language": "en-GB,en;q=0.9",
+            "Origin": "https://www.warhammer-community.com",
+            "Referer": (
+                "https://www.warhammer-community.com/"
+                "en-gb/all-news-and-features/"
+            ),
         },
+        method="POST",
     )
 
-    print("API request:", url)
+    print(f"Requesting API page {page}...")
 
     with urlopen(request, timeout=30) as response:
-        body = response.read().decode(
+        raw = response.read().decode(
             "utf-8",
             errors="replace",
         )
-
         print("HTTP status:", response.status)
         print("Content-Type:", response.headers.get("Content-Type"))
 
     try:
-        return json.loads(body)
+        data = json.loads(raw)
     except json.JSONDecodeError as error:
-        print("API response is not valid JSON.")
-        print("Response preview:", body[:1000])
+        print("Response preview:", raw[:1000])
         raise RuntimeError(
-            "The Warhammer Community API did not return JSON."
+            "The API response was not valid JSON."
         ) from error
 
+    if not isinstance(data, dict):
+        raise RuntimeError(
+            "Unexpected API response: expected a JSON object."
+        )
 
-def find_article_objects(data):
-    """Find article-like objects anywhere in the API response."""
-    found = []
+    news = data.get("news")
 
-    def walk(value):
-        if isinstance(value, dict):
-            title = (
-                value.get("title")
-                or value.get("headline")
-            )
+    if not isinstance(news, list):
+        print("API response keys:", list(data.keys()))
+        print("Response preview:", json.dumps(data)[:1500])
+        raise RuntimeError(
+            "The API response does not contain the expected 'news' list."
+        )
 
-            raw_url = (
-                value.get("uri")
-                or value.get("url")
-                or value.get("link")
-                or value.get("path")
-            )
-
-            if isinstance(title, str) and isinstance(raw_url, str):
-                title = " ".join(title.split())
-                link = urljoin(SITE_URL, raw_url.strip())
-
-                if (
-                    title
-                    and link.startswith("https://")
-                    and "warhammer-community.com" in link
-                    and "/articles/" in link
-                ):
-                    found.append({
-                        "title": title,
-                        "link": link,
-                        "date": (
-                            value.get("datePublished")
-                            or value.get("publishedAt")
-                            or value.get("published_at")
-                            or value.get("date")
-                            or value.get("created_at")
-                            or value.get("createdAt")
-                        ),
-                        "description": (
-                            value.get("excerpt")
-                            or value.get("description")
-                            or value.get("summary")
-                            or ""
-                        ),
-                    })
-
-            for child in value.values():
-                if isinstance(child, (dict, list)):
-                    walk(child)
-
-        elif isinstance(value, list):
-            for child in value:
-                walk(child)
-
-    walk(data)
-    return found
+    print(f"Articles returned on page {page}: {len(news)}")
+    return news
 
 
 def parse_date(value):
     if not value:
         return None
 
+    value = str(value).strip()
+
+    # The API may return dates such as "08 Sep 25".
+    for date_format in ("%d %b %y", "%d %b %Y"):
+        try:
+            parsed = datetime.strptime(value, date_format)
+            return parsed.replace(tzinfo=timezone.utc)
+        except ValueError:
+            pass
+
     try:
-        text = str(value).strip()
+        iso_value = value.replace("Z", "+00:00")
+        parsed = datetime.fromisoformat(iso_value)
 
-        if text.endswith("Z"):
-            text = text[:-1] + "+00:00"
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
 
-        result = datetime.fromisoformat(text)
-
-        if result.tzinfo is None:
-            result = result.replace(tzinfo=timezone.utc)
-
-        return result.astimezone(timezone.utc)
-
-    except (ValueError, TypeError):
+        return parsed.astimezone(timezone.utc)
+    except ValueError:
         return None
 
 
-def clean_description(value):
+def clean_text(value):
     if not isinstance(value, str):
         return ""
 
-    value = re.sub(r"<[^>]+>", " ", value)
-    value = " ".join(value.split())
-    return value[:2000]
+    value = re.sub(r"<[^>]*>", " ", value)
+    return " ".join(value.split())
 
 
 def main():
     articles = []
-    seen = set()
+    seen_links = set()
 
-    for page in range(1, MAX_PAGES + 1):
+    for page in range(MAX_PAGES):
         try:
-            data = fetch_json(page)
+            news = fetch_news(page)
         except (HTTPError, URLError, TimeoutError) as error:
-            if page == 1:
-                raise RuntimeError(
-                    f"Could not access the news API: {error}"
-                ) from error
+            raise RuntimeError(
+                f"Could not retrieve API page {page}: {error}"
+            ) from error
 
-            print("Could not fetch page", page, ":", error)
+        if not news:
+            print("No more articles available.")
             break
 
-        page_articles = find_article_objects(data)
-        new_count = 0
+        for entry in news:
+            if not isinstance(entry, dict):
+                continue
 
-        for article in page_articles:
-            link = article["link"]
+            title = clean_text(entry.get("title"))
+            uri = entry.get("uri")
 
-            if link not in seen:
-                seen.add(link)
-                articles.append(article)
-                new_count += 1
+            if not title or not isinstance(uri, str):
+                continue
 
-        print(
-            f"Page {page}: "
-            f"{len(page_articles)} detected, "
-            f"{new_count} new articles"
-        )
+            if not uri.startswith("/articles/"):
+                continue
 
-        if new_count == 0:
-            break
+            link = "https://www.warhammer-community.com" + uri
+
+            if link in seen_links:
+                continue
+
+            seen_links.add(link)
+
+            articles.append({
+                "title": title,
+                "link": link,
+                "date": entry.get("date", ""),
+                "description": clean_text(
+                    entry.get("excerpt", "")
+                ),
+            })
 
         if len(articles) >= MAX_ITEMS:
             break
 
     if not articles:
         raise RuntimeError(
-            "No articles were detected in the API response. "
-            "The API structure may have changed. "
-            "Check the diagnostic messages above."
+            "No articles were found. Check the API response above."
         )
 
-    # Sort by publication date when available.
     articles.sort(
-        key=lambda item: parse_date(item["date"])
+        key=lambda article: parse_date(article["date"])
         or datetime.min.replace(tzinfo=timezone.utc),
         reverse=True,
     )
+
+    articles = articles[:MAX_ITEMS]
 
     rss = ET.Element("rss", version="2.0")
     channel = ET.SubElement(rss, "channel")
 
     ET.SubElement(channel, "title").text = (
-        "Warhammer Community - Actualités"
+        "Warhammer Community - News"
     )
     ET.SubElement(channel, "link").text = (
         "https://www.warhammer-community.com/en-gb/"
+        "all-news-and-features/"
     )
     ET.SubElement(channel, "description").text = (
-        "Dernières actualités de Warhammer Community."
+        "Latest Warhammer Community articles."
     )
     ET.SubElement(channel, "language").text = "en-gb"
     ET.SubElement(channel, "lastBuildDate").text = (
         format_datetime(datetime.now(timezone.utc))
     )
 
-    for article in articles[:MAX_ITEMS]:
+    for article in articles:
         item = ET.SubElement(channel, "item")
 
         ET.SubElement(item, "title").text = article["title"]
@@ -227,9 +206,10 @@ def main():
             article["link"]
         )
 
-        description = clean_description(article["description"])
-        if description:
-            ET.SubElement(item, "description").text = description
+        if article["description"]:
+            ET.SubElement(item, "description").text = (
+                article["description"]
+            )
 
         published = parse_date(article["date"])
         if published:
@@ -247,7 +227,7 @@ def main():
 
     print()
     print("SUCCESS: RSS feed generated.")
-    print("Articles written:", min(len(articles), MAX_ITEMS))
+    print("Articles written:", len(articles))
     print("Output file:", OUTPUT_FILE)
 
 
