@@ -7,7 +7,7 @@ from email.utils import format_datetime
 import os
 import xml.etree.ElementTree as ET
 
-SOURCE_URL = "https://www.warhammer-community.com/en-gb/"
+SOURCE_URL = "https://www.warhammer-community.com/en-gb/all-news-and-features/news/"
 OUTPUT_FILE = "docs/feed.xml"
 MAX_ITEMS = 30
 
