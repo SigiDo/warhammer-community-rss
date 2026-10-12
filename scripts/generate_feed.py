@@ -5,7 +5,6 @@ from urllib.parse import urljoin
 from datetime import datetime, timezone
 from email.utils import format_datetime
 import os
-import re
 import xml.etree.ElementTree as ET
 
 SOURCE_URL = (
@@ -68,7 +67,17 @@ def main():
 
     print("HTML length:", len(html))
 
-    # Diagnostic : rechercher des indices de contenu et de dates.
+    # Afficher les métadonnées autour de datePublished.
+    index = html.find("datePublished")
+
+    if index != -1:
+        print("\n=== CONTENU AUTOUR DE datePublished ===")
+        print(html[max(0, index - 1000):index + 2500])
+        print("\n=== FIN DU CONTENU ===")
+    else:
+        print("datePublished introuvable")
+
+    # Rechercher des marqueurs utiles dans le HTML.
     for keyword in [
         "Latest News",
         "News & Features",
@@ -86,13 +95,9 @@ def main():
     parser = ArticleParser()
     parser.feed(html)
 
-    print("First 30 detected links:")
+    print("\nFirst 30 detected links:")
     for title, link in parser.articles[:30]:
         print(repr(title), link)
-
-    # Écrire un rapport de diagnostic pour le journal GitHub Actions.
-    if not parser.articles:
-        raise RuntimeError("No article links detected in the HTML.")
 
     unique = []
     seen = set()
@@ -102,10 +107,12 @@ def main():
             seen.add(link)
             unique.append((title, link))
 
-    # Ne pas prétendre que ces liens sont les dernières actualités :
-    # le journal doit d'abord permettre de vérifier leur nature.
+    if not unique:
+        raise RuntimeError("No article links detected in the HTML.")
+
     rss = ET.Element("rss", version="2.0")
     channel = ET.SubElement(rss, "channel")
+
     ET.SubElement(channel, "title").text = (
         "Warhammer Community - Diagnostic"
     )
@@ -126,6 +133,7 @@ def main():
         ET.SubElement(item, "guid", isPermaLink="true").text = link
 
     os.makedirs("docs", exist_ok=True)
+
     ET.ElementTree(rss).write(
         OUTPUT_FILE,
         encoding="utf-8",
