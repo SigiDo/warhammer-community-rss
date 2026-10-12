@@ -56,6 +56,13 @@ def main():
 
     parser = ArticleParser()
     parser.feed(html)
+    
+    print("SOURCE:", SOURCE_URL)
+    print("HTML length:", len(html))
+    print("First 20 detected links:")
+
+for title, link in parser.articles[:20]:
+    print(repr(title), link)
 
     # Supprime les doublons en conservant le premier titre trouvé.
     unique = []
