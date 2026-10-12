@@ -5,6 +5,7 @@ from urllib.parse import urljoin
 from datetime import datetime, timezone
 from email.utils import format_datetime
 import os
+import re
 import xml.etree.ElementTree as ET
 
 SOURCE_URL = (
@@ -19,26 +20,24 @@ class ArticleParser(HTMLParser):
     def __init__(self):
         super().__init__()
         self.articles = []
-        self.current_href = None
-        self.current_text = []
+        self.href = None
+        self.text = []
 
     def handle_starttag(self, tag, attrs):
         if tag == "a":
-            attributes = dict(attrs)
-            href = attributes.get("href")
-
+            href = dict(attrs).get("href")
             if href:
-                self.current_href = href
-                self.current_text = []
+                self.href = href
+                self.text = []
 
     def handle_data(self, data):
-        if self.current_href is not None:
-            self.current_text.append(data)
+        if self.href is not None:
+            self.text.append(data)
 
     def handle_endtag(self, tag):
-        if tag == "a" and self.current_href:
-            title = " ".join("".join(self.current_text).split())
-            link = urljoin(SOURCE_URL, self.current_href)
+        if tag == "a" and self.href:
+            title = " ".join("".join(self.text).split())
+            link = urljoin(SOURCE_URL, self.href)
 
             if (
                 "/en-gb/articles/" in link
@@ -47,8 +46,8 @@ class ArticleParser(HTMLParser):
             ):
                 self.articles.append((title, link))
 
-            self.current_href = None
-            self.current_text = []
+            self.href = None
+            self.text = []
 
 
 def main():
@@ -57,7 +56,7 @@ def main():
     request = Request(
         SOURCE_URL,
         headers={
-            "User-Agent": "Mozilla/5.0 (compatible; CommunityRSS/1.0)",
+            "User-Agent": "Mozilla/5.0",
             "Accept-Language": "en-GB,en;q=0.9",
         },
     )
@@ -69,61 +68,71 @@ def main():
 
     print("HTML length:", len(html))
 
+    # Diagnostic : rechercher des indices de contenu et de dates.
+    for keyword in [
+        "Latest News",
+        "News & Features",
+        "article-card",
+        "datePublished",
+        "publishedAt",
+        "__NEXT_DATA__",
+    ]:
+        print(
+            "MARKER",
+            repr(keyword),
+            html.lower().find(keyword.lower()),
+        )
+
     parser = ArticleParser()
     parser.feed(html)
 
-    print("First 20 detected links:")
-    for title, link in parser.articles[:20]:
+    print("First 30 detected links:")
+    for title, link in parser.articles[:30]:
         print(repr(title), link)
 
-    # Supprimer les doublons en conservant le premier titre trouvé.
-    unique_articles = []
-    seen_links = set()
+    # Écrire un rapport de diagnostic pour le journal GitHub Actions.
+    if not parser.articles:
+        raise RuntimeError("No article links detected in the HTML.")
+
+    unique = []
+    seen = set()
 
     for title, link in parser.articles:
-        if link not in seen_links:
-            seen_links.add(link)
-            unique_articles.append((title, link))
+        if link not in seen:
+            seen.add(link)
+            unique.append((title, link))
 
-    articles = unique_articles[:MAX_ITEMS]
-
-    if not articles:
-        raise RuntimeError(
-            "No articles detected. Check the HTML output: "
-            "the site may require JavaScript or may have changed."
-        )
-
+    # Ne pas prétendre que ces liens sont les dernières actualités :
+    # le journal doit d'abord permettre de vérifier leur nature.
     rss = ET.Element("rss", version="2.0")
     channel = ET.SubElement(rss, "channel")
-
     ET.SubElement(channel, "title").text = (
-        "Warhammer Community - English News"
+        "Warhammer Community - Diagnostic"
     )
     ET.SubElement(channel, "link").text = (
         "https://www.warhammer-community.com/en-gb/"
     )
     ET.SubElement(channel, "description").text = (
-        "Articles detected on the official Warhammer Community website."
+        "Diagnostic feed; detected links are not yet verified as news."
     )
     ET.SubElement(channel, "lastBuildDate").text = format_datetime(
         datetime.now(timezone.utc)
     )
 
-    for title, link in articles:
+    for title, link in unique[:MAX_ITEMS]:
         item = ET.SubElement(channel, "item")
         ET.SubElement(item, "title").text = title
         ET.SubElement(item, "link").text = link
         ET.SubElement(item, "guid", isPermaLink="true").text = link
 
-    os.makedirs(os.path.dirname(OUTPUT_FILE), exist_ok=True)
-
+    os.makedirs("docs", exist_ok=True)
     ET.ElementTree(rss).write(
         OUTPUT_FILE,
         encoding="utf-8",
         xml_declaration=True,
     )
 
-    print(f"RSS generated successfully: {len(articles)} articles.")
+    print(f"RSS generated: {min(len(unique), MAX_ITEMS)} links")
 
 
 if __name__ == "__main__":
